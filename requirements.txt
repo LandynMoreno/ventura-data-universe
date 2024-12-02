@@ -17,3 +17,6 @@ huggingface-hub~=0.23.3
 datasets~=2.20.0
 pyarrow==17.0.0
 psutil==5.9.8
+
+# Ventura adds
+dataclasses==0.6

@@ -9,6 +9,12 @@ from typing import Dict, List, Optional
 import numpy
 from pydantic import Field, PositiveInt
 
+# VENTURA ADDS
+import time
+from dataclasses import dataclass
+from queue import Queue
+from scraping.reddit.model import RedditContent
+
 from common.data import DataLabel, DataSource, StrictBaseModel, TimeBucket
 from scraping.provider import ScraperProvider
 from scraping.scraper import ScrapeConfig, ScraperId
@@ -55,6 +61,29 @@ class ScraperConfig(StrictBaseModel):
         """
     )
 
+@dataclass
+class VenturaScraperConfig:
+    """Configuration for the Reddit scraper"""
+    max_content_age_days: int = 30
+    collection_frequency_seconds: int = 43200  # 12 hours
+    batch_size: int = 500
+    max_queue_size: int = 100000
+    subreddits: List[str] = [
+        "r/Bitcoin",
+        "r/BitcoinCash",
+        "r/Bittensor_",
+        "r/Btc",
+        "r/Cryptocurrency",
+        "r/Cryptomarkets",
+        "r/EthereumClassic",
+        "r/Ethtrader",
+        "r/Filecoin",
+        "r/Monero",
+        "r/Polkadot",
+        "r/Solana",
+        "r/WallstreetBets",
+        "r/nearprotocol"
+    ]
 
 class CoordinatorConfig(StrictBaseModel):
     """Informs the Coordinator how to schedule scrapes."""
@@ -154,6 +183,11 @@ class ScraperCoordinator:
         self.is_running = False
         self.queue = asyncio.Queue()
 
+        # VENTURA ADDED
+        self.data_queue = Queue(maxsize=VenturaScraperConfig.max_queue_size)
+        self.priority_subreddits = self._load_priority_subreddits()
+        self.all_categories = ["hot", "new", "top", "rising"] # For broad 'all' search threads
+
     def run_in_background_thread(self):
         """
         Runs the Coordinator on a background thread. The coordinator will run until the process dies.
@@ -173,6 +207,14 @@ class ScraperCoordinator:
         bt.logging.info("Stopping the ScrapingCoordinator.")
         self.is_running = False
 
+    '''VENTURA ADDED FUNCTIONS'''
+    def _load_priority_subreddits(self) -> List[str]:
+        """Load priority subreddits from environment variable"""
+        return VenturaScraperConfig.subreddits
+    
+    ''''''
+
+    # THIS HAS BEEN CHANGED BY VENTURA
     async def _start(self):
         workers = []
         for i in range(self.max_workers):
@@ -183,31 +225,57 @@ class ScraperCoordinator:
             )
             workers.append(worker)
 
-        while self.is_running:
-            now = dt.datetime.utcnow()
-            scraper_ids_to_scrape_now = self.tracker.get_scraper_ids_ready_to_scrape(
-                now
-            )
-            if not scraper_ids_to_scrape_now:
-                bt.logging.trace("Nothing ready to scrape yet. Trying again in 15s.")
-                # Nothing is due a scrape. Wait a few seconds and try again
-                await asyncio.sleep(15)
-                continue
+        try:
+            while self.is_running:
+                # Enqueue tasks for priority subreddits
+                for subreddit in self.priority_subreddits:
+                    task = functools.partial(self._scrape_subreddit_stream, subreddit)
+                    self.queue.put_nowait(task)
 
-            for scraper_id in scraper_ids_to_scrape_now:
-                scraper = self.provider.get(scraper_id)
+                # Enqueue tasks for "all" sub-categories
+                for category in self.all_categories:
+                    task = functools.partial(self._scrape_subreddit_stream, f"all:{category}")
+                    self.queue.put_nowait(task)
 
-                scrape_configs = _choose_scrape_configs(scraper_id, self.config, now)
+                # Enqueue an additional task for the "all" category
+                task = functools.partial(self._scrape_subreddit_stream, "all")
+                self.queue.put_nowait(task)
 
-                for config in scrape_configs:
-                    # Use .partial here to make sure the functions arguments are copied/stored
-                    # now rather than being lazily evaluated (if a lambda was used).
-                    # https://pylint.readthedocs.io/en/latest/user_guide/messages/warning/cell-var-from-loop.html#cell-var-from-loop-w0640
-                    bt.logging.trace(f"Adding scrape task for {scraper_id}: {config}.")
-                    self.queue.put_nowait(functools.partial(scraper.scrape, config))
+                # Sleep for 4 hours (scraping interval)
+                bt.logging.info("Tasks enqueued. Sleeping for 4 hours...")
+                await asyncio.sleep(0.5 * 60 * 60)
 
-                self.tracker.on_scrape_scheduled(scraper_id, now)
+        except asyncio.CancelledError:
+            bt.logging.warning("Scraping interrupted.")
+        finally:
+            # Signal threads to stop
+            self.is_running = False
 
+        # while self.is_running:
+        #     now = dt.datetime.utcnow()
+        #     scraper_ids_to_scrape_now = self.tracker.get_scraper_ids_ready_to_scrape(
+        #         now
+        #     )
+        #     if not scraper_ids_to_scrape_now:
+        #         bt.logging.trace("Nothing ready to scrape yet. Trying again in 15s.")
+        #         # Nothing is due a scrape. Wait a few seconds and try again
+        #         await asyncio.sleep(15)
+        #         continue
+
+        #     for scraper_id in scraper_ids_to_scrape_now:
+        #         scraper = self.provider.get(scraper_id)
+
+        #         scrape_configs = _choose_scrape_configs(scraper_id, self.config, now)
+
+        #         for config in scrape_configs:
+        #             # Use .partial here to make sure the functions arguments are copied/stored
+        #             # now rather than being lazily evaluated (if a lambda was used).
+        #             # https://pylint.readthedocs.io/en/latest/user_guide/messages/warning/cell-var-from-loop.html#cell-var-from-loop-w0640
+        #             bt.logging.trace(f"Adding scrape task for {scraper_id}: {config}.")
+        #             self.queue.put_nowait(functools.partial(scraper.scrape, config))
+
+        #         self.tracker.on_scrape_scheduled(scraper_id, now)
+      
         bt.logging.info("Coordinator shutting down. Waiting for workers to finish.")
         await asyncio.gather(*workers)
         bt.logging.info("Coordinator stopped.")

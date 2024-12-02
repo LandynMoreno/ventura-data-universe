@@ -212,6 +212,41 @@ class RedditCustomScraper(Scraper):
 
         return True
 
+    def _scrape_subreddit_stream(self, subreddit_name: str):
+        """Stream submissions and comments from a subreddit"""
+        try:
+            subreddit = self.reddit.subreddit(subreddit_name)
+            
+            # Stream submissions
+            for submission in subreddit.stream.submissions():
+                if not self.running:
+                    break
+                
+                #content = self._process_submission(submission)
+                content = self._best_effort_parse_submission(submission)
+                if content:
+                    self.data_queue.put(content)
+
+            # VENTURA IMPLEMENTATION FOR TIMEOUTS
+            time.sleep(5)
+            
+            # Stream comments
+            for comment in subreddit.stream.comments():
+                if not self.running:
+                    break
+                
+                #content = self._process_comment(comment)
+                content = self._best_effort_parse_comment(comment)
+                if content:
+                    self.data_queue.put(content)
+            
+            # VENTURA IMPLEMENTATION FOR TIMEOUTS
+            time.sleep(5)
+
+        except Exception as e:
+            print(f"Error in subreddit stream {subreddit_name}: {str(e)}")
+            time.sleep(60)  # Wait before retrying
+
     async def scrape(self, scrape_config: ScrapeConfig) -> List[DataEntity]:
         """Scrapes a batch of reddit posts/comments according to the scrape config."""
         bt.logging.trace(
